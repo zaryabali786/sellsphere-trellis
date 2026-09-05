@@ -42,7 +42,7 @@ def download_image(url_or_data):
     elif url_or_data.startswith("http://") or url_or_data.startswith("https://"):
         resp = requests.get(url_or_data, timeout=30)
         resp.raise_for_status()
-        return Image.open(io.BytesIO(resp.content))).convert("RGBA")
+        return Image.open(io.BytesIO(resp.content)).convert("RGBA")
     elif os.path.exists(url_or_data):
         return Image.open(url_or_data).convert("RGBA")
     else:
