@@ -1,4 +1,4 @@
-# RunPod Serverless Dockerfile for Microsoft TRELLIS (Image-to-3D GLB & Apple USDZ) - Release v1.0.2
+# RunPod Serverless Dockerfile for Microsoft TRELLIS (Image-to-3D GLB & Apple USDZ) - Release v1.0.3
 FROM runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04
 
 WORKDIR /content

@@ -1,5 +1,5 @@
 """
-RunPod Serverless Handler for Microsoft TRELLIS v1.0.2 (High-Quality Image-to-3D with GLB & Apple USDZ)
+RunPod Serverless Handler for Microsoft TRELLIS v1.0.3 (High-Quality Image-to-3D with GLB & Apple USDZ)
 """
 import os
 import sys
