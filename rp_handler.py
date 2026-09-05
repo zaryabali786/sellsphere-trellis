@@ -1,10 +1,17 @@
 """
-RunPod Serverless Handler for Microsoft TRELLIS (Image-to-3D GLB & USDZ)
+RunPod Serverless Handler for Microsoft TRELLIS (High-Quality Image-to-3D with GLB & Apple USDZ)
 """
-import io
 import os
 import sys
+
+# Configure backends before importing PyTorch
+os.environ["ATTN_BACKEND"] = "xformers"
+os.environ["SPCONV_ALGO"] = "native"
+
+import io
+import time
 import base64
+import subprocess
 import requests
 import runpod
 from PIL import Image
@@ -20,17 +27,13 @@ def load_pipeline():
         return pipeline
 
     import torch
-    print("Loading Microsoft TRELLIS 3D pipeline...")
-    # Load model from HuggingFace checkpoint
-    try:
-        from trellis.pipelines import TrellisImageTo3DPipeline
-        pipeline = TrellisImageTo3DPipeline.from_pretrained("JeffreyXiang/TRELLIS-image-large")
-        if torch.cuda.is_available():
-            pipeline.cuda()
-        print("TRELLIS pipeline successfully loaded onto GPU.")
-    except Exception as err:
-        print(f"Pipeline initialization notice: {err}")
-        pipeline = {"mock": False, "ready": True, "device": "cuda" if torch.cuda.is_available() else "cpu"}
+    print(f"Loading Microsoft TRELLIS 3D pipeline (CUDA available: {torch.cuda.is_available()})...")
+    from trellis.pipelines import TrellisImageTo3DPipeline
+
+    pipeline = TrellisImageTo3DPipeline.from_pretrained("JeffreyXiang/TRELLIS-image-large")
+    if torch.cuda.is_available():
+        pipeline.cuda()
+    print("Microsoft TRELLIS pipeline successfully loaded onto GPU.")
     return pipeline
 
 def download_image(url_or_data):
@@ -56,17 +59,32 @@ def file_to_base64_data_uri(filepath, mime_type="model/gltf-binary"):
 
 def convert_glb_to_usdz(glb_path, usdz_path):
     """
-    Converts GLB mesh to USDZ for Apple iOS AR Quick Look.
+    Converts GLB to Apple USDZ using Blender 4.2 LTS headless.
+    Preserves all PBR materials, base colors, and textures without watermarks.
     """
+    cmd = [
+        "blender",
+        "-b",
+        "--python",
+        "/content/convert_glb_to_usdz.py",
+        "--",
+        glb_path,
+        usdz_path
+    ]
     try:
-        import trimesh
-        scene = trimesh.load(glb_path)
-        # Export as USDZ if supported by exporter, or write packaged zip/usdz
-        scene.export(usdz_path)
-        return True
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+        if res.returncode == 0 and os.path.exists(usdz_path) and os.path.getsize(usdz_path) > 100:
+            print(f"Blender USDZ conversion success ({os.path.getsize(usdz_path)} bytes)")
+            return True
+        else:
+            print(f"Blender returncode: {res.returncode}")
+            if res.stdout:
+                print(f"Blender stdout: {res.stdout[-400:]}")
+            if res.stderr:
+                print(f"Blender stderr: {res.stderr[-400:]}")
+            return False
     except Exception as e:
-        print(f"USDZ conversion note: {e}")
-        # Fallback copy if direct export fails
+        print(f"Blender execution error: {e}")
         return False
 
 def handler(job):
@@ -77,44 +95,49 @@ def handler(job):
     slat_guidance_strength = float(job_input.get("slat_guidance_strength", 3.0))
 
     if not image_url:
-        return {"error": "Image input is required (URL or base64)"}
+        return {"error": "Image input is required (URL or base64)", "status": "FAILED"}
 
     try:
+        t_start = time.time()
         pipe = load_pipeline()
         img = download_image(image_url)
 
-        output_dir = "/tmp/trellis_output"
+        job_id = str(job.get("id", "job"))
+        output_dir = f"/tmp/trellis_output/{job_id}"
         os.makedirs(output_dir, exist_ok=True)
         glb_file = os.path.join(output_dir, "model.glb")
         usdz_file = os.path.join(output_dir, "model.usdz")
 
-        # Run inference if full pipeline object loaded
-        if hasattr(pipe, "run"):
-            from trellis.utils import postprocessing_utils
-            outputs = pipe.run(
-                img,
-                seed=seed,
-                sparse_structure_sampler_params={"steps": 12, "cfg_strength": ss_guidance_strength},
-                slat_sampler_params={"steps": 12, "cfg_strength": slat_guidance_strength}
-            )
-            glb = postprocessing_utils.to_glb(
-                outputs["gaussian"][0],
-                outputs["mesh"][0],
-                simplify=0.95,
-                texture_size=1024
-            )
-            glb.export(glb_file)
-        else:
-            # Placeholder/fallback creation for testing connectivity
-            import trimesh
-            box = trimesh.creation.box(extents=[1.0, 1.0, 1.0])
-            box.export(glb_file)
+        print(f"Starting TRELLIS 3D inference (Image: {img.size}, seed: {seed})...")
+        outputs = pipe.run(
+            img,
+            seed=seed,
+            sparse_structure_sampler_params={"steps": 12, "cfg_strength": ss_guidance_strength},
+            slat_sampler_params={"steps": 12, "cfg_strength": slat_guidance_strength},
+            formats=["mesh", "gaussian"],
+            preprocess_image=True
+        )
 
-        # Convert to USDZ for Apple iOS
-        convert_glb_to_usdz(glb_file, usdz_file)
+        print("Synthesizing 3D mesh & baking 1024x1024 PBR textures...")
+        from trellis.utils import postprocessing_utils
+        glb = postprocessing_utils.to_glb(
+            outputs["gaussian"][0],
+            outputs["mesh"][0],
+            simplify=0.95,
+            texture_size=1024
+        )
+        glb.export(glb_file)
+        glb_size = os.path.getsize(glb_file)
+        print(f"Textured GLB created successfully ({glb_size} bytes, {round(time.time() - t_start, 1)}s)")
+
+        # Convert to USDZ for Apple AR Quick Look
+        print("Converting GLB to Apple USDZ via Blender 4.2...")
+        usdz_ok = convert_glb_to_usdz(glb_file, usdz_file)
 
         glb_uri = file_to_base64_data_uri(glb_file, "model/gltf-binary")
-        usdz_uri = file_to_base64_data_uri(usdz_file, "model/vnd.usdz+zip") if os.path.exists(usdz_file) else None
+        usdz_uri = file_to_base64_data_uri(usdz_file, "model/vnd.usdz+zip") if usdz_ok and os.path.exists(usdz_file) else None
+
+        print(f"Completed job {job_id}. Total time: {round(time.time() - t_start, 1)}s")
 
         return {
             "status": "COMPLETED",
@@ -124,7 +147,15 @@ def handler(job):
         }
 
     except Exception as e:
-        print(f"Error in TRELLIS handler: {e}")
+        import traceback
+        err_msg = f"Error in TRELLIS handler: {e}\n{traceback.format_exc()}"
+        print(err_msg)
         return {"error": str(e), "status": "FAILED"}
+
+# Warm up pipeline on worker startup
+try:
+    load_pipeline()
+except Exception as e:
+    print(f"Startup notice: pipeline warm-up deferred: {e}")
 
 runpod.serverless.start({"handler": handler})
