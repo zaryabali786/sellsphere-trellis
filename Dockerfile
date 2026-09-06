@@ -39,7 +39,7 @@ RUN wget -q https://download.blender.org/release/Blender4.2/blender-4.2.0-linux-
 
 # Install python dependencies from requirements.txt
 COPY requirements.txt /content/requirements.txt
-RUN pip install --no-cache-dir -r /content/requirements.txt
+RUN pip uninstall -y blinker || true && pip install --no-cache-dir --ignore-installed -r /content/requirements.txt
 
 # Install official pre-built wheels for PyTorch 2.2.0 + CUDA 12.1
 RUN pip install --no-cache-dir xformers==0.0.24 --index-url https://download.pytorch.org/whl/cu121
